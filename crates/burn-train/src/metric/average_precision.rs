@@ -5,7 +5,7 @@ use super::state::{FormatOptions, NumericMetricState};
 use super::{MetricEntry, MetricMetadata};
 use crate::metric::{Metric, Numeric};
 use burn_core::tensor::backend::Backend;
-use burn_core::tensor::{ElementConversion, Int, Tensor};
+use burn_core::tensor::{ElementConversion, Int, Shape, Tensor};
 
 /// [Average Precision](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.average_precision_score.html) (also referred to as AP) for binary classification.
 #[derive(Default)]
@@ -32,36 +32,78 @@ impl<B: Backend> AveragePrecisionMetric<B> {
         probabilities: &Tensor<B, 1>,
         targets: &Tensor<B, 1, Int>,
     ) -> f64 {
-        /*TODO do I need this?
-        // Early return if we don't have both positive and negative samples
-        if n_pos == 0 || n_pos == n {
-            if n_pos == 0 {
-                log::warn!("Metric cannot be computed because all target values are negative.")
-            } else {
-                log::warn!("Metric cannot be computed because all target values are positive.")
-            }
-            return 0.0;
-        } */
-
         let [n_samples] = probabilities.dims();
+        let positives = targets.clone().sum().into_scalar().elem::<u64>() as usize;
+
+        // Early return if we don't have both positive samples
+        if positives == 0 {
+            log::warn!("Metric cannot be computed because all target values are negative.");
+            return 0.0;
+        }
 
         let desc_score_indices = probabilities.clone().argsort_descending(0);
 
+        let probabilities = probabilities.clone().select(0, desc_score_indices.clone());
         let targets = targets.clone().select(0, desc_score_indices.clone());
 
-        let threshold_idxs = Tensor::arange(0..(n_samples as i64), &probabilities.device()).float();
-        let tps = targets.clone().cumsum(0).float();
+        let probabilities_cur = probabilities.clone().slice([0..n_samples - 1]);
+        let probabilities_next = probabilities.clone().slice([1..n_samples]);
+        let distinct_value_indices = (probabilities_next - probabilities_cur)
+            .abs()
+            .greater_elem(0)
+            .nonzero()
+            .into_iter()
+            .next()
+            .unwrap_or(Tensor::<B, 1, Int>::ones(
+                Shape::new([0]),
+                &probabilities.device(),
+            ));
+        let threshold_idxs = Tensor::cat(
+            vec![
+                distinct_value_indices.clone(),
+                Tensor::full(
+                    Shape::new([1]),
+                    (n_samples - 1) as u64,
+                    &distinct_value_indices.device(),
+                ),
+            ],
+            0,
+        );
+
+        let tps = targets
+            .clone()
+            .cumsum(0)
+            .select(0, threshold_idxs.clone())
+            .float();
+        let threshold_idxs = threshold_idxs.float();
         let fps = threshold_idxs - tps.clone() + 1;
 
         let precision = tps.clone().div(tps.clone() + fps);
-        let positives = targets.sum().float();
+        let positives = targets.clone().sum().float();
         let recall = tps.div(positives);
         let precision = precision.flip([0]);
         let recall = recall.flip([0]);
 
-        let recall_cur = recall.clone().slice([0..n_samples - 1]);
-        let recall_next = recall.slice([1..n_samples]);
-        let precision_cur = precision.slice([0..n_samples - 1]);
+        let precision = Tensor::cat(
+            vec![
+                precision.clone(),
+                Tensor::ones(Shape::new([1]), &precision.device()),
+            ],
+            0,
+        );
+        let recall = Tensor::cat(
+            vec![
+                recall.clone(),
+                Tensor::zeros(Shape::new([1]), &recall.device()),
+            ],
+            0,
+        );
+
+        let n = precision.dims()[0];
+        let recall_cur = recall.clone().slice([0..n - 1]);
+        let recall_next = recall.clone().slice([1..n]);
+        let precision_cur = precision.clone().slice([0..n - 1]);
+
         let average_precision = (-(recall_next - recall_cur) * precision_cur)
             .sum()
             .into_scalar()
@@ -97,7 +139,7 @@ impl<B: Backend> Metric for AveragePrecisionMetric<B> {
         let average_precision = self.binary_average_precision(&probabilities, &input.targets);
 
         self.state.update(
-            100.0 * average_precision, // TODO, max 1?
+            100.0 * average_precision,
             batch_size,
             FormatOptions::new(Self::NAME).unit("%").precision(2),
         )
@@ -138,7 +180,7 @@ mod tests {
         );
 
         let _entry = metric.update(&input, &MetricMetadata::fake());
-        assert_eq!(metric.value(), 100.0);
+        assert_eq!(metric.value(), 100.);
     }
 
     #[test]
@@ -152,7 +194,7 @@ mod tests {
         );
 
         let _entry = metric.update(&input, &MetricMetadata::fake());
-        assert_eq!(metric.value(), 100.0); // Perfect AUC
+        assert_eq!(metric.value(), 100.0); // Perfect AP
     }
 
     #[test]
@@ -178,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_average_precision_all_one_class() {
+    fn test_average_precision_all_positives() {
         let device = Default::default();
         let mut metric = AveragePrecisionMetric::<TestBackend>::new();
 
@@ -193,6 +235,28 @@ mod tests {
                 &device,
             ),
             Tensor::from_data([1, 1, 1, 1], &device), // All positive class
+        );
+
+        let _entry = metric.update(&input, &MetricMetadata::fake());
+        assert_eq!(metric.value(), 100.0);
+    }
+
+    #[test]
+    fn test_average_precision_all_negatives() {
+        let device = Default::default();
+        let mut metric = AveragePrecisionMetric::<TestBackend>::new();
+
+        let input = AveragePrecisionInput::new(
+            Tensor::from_data(
+                [
+                    [0.1, 0.9], // All positives predictions
+                    [0.2, 0.8],
+                    [0.3, 0.7],
+                    [0.4, 0.6],
+                ],
+                &device,
+            ),
+            Tensor::from_data([0, 0, 0, 0], &device), // All positive class
         );
 
         let _entry = metric.update(&input, &MetricMetadata::fake());
