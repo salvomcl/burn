@@ -24,6 +24,7 @@ pub use memory_use::*;
 // Training metrics
 mod acc;
 mod auroc;
+mod average_precision;
 mod base;
 mod confusion_stats;
 mod fbetascore;
@@ -37,6 +38,7 @@ mod top_k_acc;
 
 pub use acc::*;
 pub use auroc::*;
+pub use average_precision::*;
 pub use base::*;
 pub use confusion_stats::ConfusionStatsInput;
 pub use fbetascore::*;
