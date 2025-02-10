@@ -11,7 +11,7 @@ throughout the training process. We currently offer a restricted range of metric
 | Recall            | Calculate recall in percentage                          |
 | FBetaScore        | Calculate F<sub>β </sub>score in percentage             |
 | AUROC             | Calculate the area under curve of ROC in percentage     |
-| Average Precision | Calculate the area under curve of ROC in percentage     |
+| Average Precision | Calculate the average precision in percentage           |
 | Loss              | Output the loss used for the backward pass              |
 | CPU Temperature   | Fetch the temperature of CPUs                           |
 | CPU Usage         | Fetch the CPU utilization                               |
