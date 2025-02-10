@@ -7,14 +7,14 @@ use crate::metric::{Metric, Numeric};
 use burn_core::tensor::backend::Backend;
 use burn_core::tensor::{ElementConversion, Int, Tensor};
 
-/// The Area Under the Receiver Operating Characteristic Curve (AUROC, also referred to as [ROC AUC](https://en.wikipedia.org/wiki/Receiver_operating_characteristic)) for binary classification.
+/// [Average Precision](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.average_precision_score.html) (also referred to as AP) for binary classification.
 #[derive(Default)]
 pub struct AveragePrecisionMetric<B: Backend> {
     state: NumericMetricState,
     _b: PhantomData<B>,
 }
 
-/// The [AUROC metric](AurocMetric) input type.
+/// The [Average Precision metric](AveragePrecisionMetric) input type.
 #[derive(new)]
 pub struct AveragePrecisionInput<B: Backend> {
     outputs: Tensor<B, 2>,
@@ -32,10 +32,7 @@ impl<B: Backend> AveragePrecisionMetric<B> {
         probabilities: &Tensor<B, 1>,
         targets: &Tensor<B, 1, Int>,
     ) -> f64 {
-        let n = targets.dims()[0];
-
-        let n_pos = targets.clone().sum().into_scalar().elem::<u64>() as usize;
-
+        /*TODO do I need this?
         // Early return if we don't have both positive and negative samples
         if n_pos == 0 || n_pos == n {
             if n_pos == 0 {
@@ -44,34 +41,37 @@ impl<B: Backend> AveragePrecisionMetric<B> {
                 log::warn!("Metric cannot be computed because all target values are positive.")
             }
             return 0.0;
-        }
+        } */
 
-        let pos_mask = targets.clone().equal_elem(1).int().reshape([n, 1]);
-        let neg_mask = targets.clone().equal_elem(0).int().reshape([1, n]);
+        let [n_samples] = probabilities.dims();
 
-        let valid_pairs = pos_mask * neg_mask;
+        let desc_score_indices = probabilities.clone().argsort_descending(0);
 
-        let prob_i = probabilities.clone().reshape([n, 1]).repeat_dim(1, n);
-        let prob_j = probabilities.clone().reshape([1, n]).repeat_dim(0, n);
+        let targets = targets.clone().select(0, desc_score_indices.clone());
 
-        let correct_order = prob_i.clone().greater(prob_j.clone()).int();
+        let threshold_idxs = Tensor::arange(0..(n_samples as i64), &probabilities.device()).float();
+        let tps = targets.clone().cumsum(0).float();
+        let fps = threshold_idxs - tps.clone() + 1;
 
-        let ties = prob_i.equal(prob_j).int();
+        let precision = tps.clone().div(tps.clone() + fps);
+        let positives = targets.sum().float();
+        let recall = tps.div(positives);
+        let precision = precision.flip([0]);
+        let recall = recall.flip([0]);
 
-        // Calculate AUC components
-        let num_pairs = valid_pairs.clone().sum().into_scalar().elem::<f64>();
-        let correct_pairs = (correct_order * valid_pairs.clone())
+        let recall_cur = recall.clone().slice([0..n_samples - 1]);
+        let recall_next = recall.slice([1..n_samples]);
+        let precision_cur = precision.slice([0..n_samples - 1]);
+        let average_precision = (-(recall_next - recall_cur) * precision_cur)
             .sum()
             .into_scalar()
             .elem::<f64>();
-        let tied_pairs = (ties * valid_pairs).sum().into_scalar().elem::<f64>();
-
-        (correct_pairs + 0.5 * tied_pairs) / num_pairs
+        average_precision
     }
 }
 
 impl<B: Backend> Metric for AveragePrecisionMetric<B> {
-    const NAME: &'static str = "Area Under the Receiver Operating Characteristic Curve";
+    const NAME: &'static str = "Average Precision";
     type Input = AveragePrecisionInput<B>;
 
     fn update(
@@ -94,10 +94,10 @@ impl<B: Backend> Metric for AveragePrecisionMetric<B> {
                 .squeeze(1)
         };
 
-        let area_under_curve = self.binary_average_precision(&probabilities, &input.targets);
+        let average_precision = self.binary_average_precision(&probabilities, &input.targets);
 
         self.state.update(
-            100.0 * area_under_curve,
+            100.0 * average_precision, // TODO, max 1?
             batch_size,
             FormatOptions::new(Self::NAME).unit("%").precision(2),
         )
@@ -120,40 +120,102 @@ mod tests {
     use crate::TestBackend;
 
     #[test]
-    fn test_auroc() {
+    fn test_average_precision() {
         let device = Default::default();
+        let mut metric = AveragePrecisionMetric::<TestBackend>::new();
 
-        let preds: Tensor<TestBackend, 1> = Tensor::from_data(
-            [
-                0.6415, 0.9519, 0.9603, 0.0432, 0.9516, 0.6263, 0.6666, 0.1332, 0.0507, 0.9452,
-            ],
-            &device,
+        let input = AveragePrecisionInput::new(
+            Tensor::from_data(
+                [
+                    [0.1, 0.9], // High confidence positive
+                    [0.7, 0.3], // Low confidence negative
+                    [0.6, 0.4], // Low confidence negative
+                    [0.2, 0.8], // High confidence positive
+                ],
+                &device,
+            ),
+            Tensor::from_data([1, 0, 0, 1], &device), // True labels
         );
-        let target: Tensor<TestBackend, 1, Int> =
-            Tensor::from_data([1, 0, 0, 1, 1, 0, 1, 0, 1, 1], &device);
 
-        let [n_samples] = preds.dims();
+        let _entry = metric.update(&input, &MetricMetadata::fake());
+        assert_eq!(metric.value(), 100.0);
+    }
 
-        let desc_score_indices = preds.clone().argsort_descending(0);
+    #[test]
+    fn test_average_precision_perfect_separation() {
+        let device = Default::default();
+        let mut metric = AveragePrecisionMetric::<TestBackend>::new();
 
-        let target = target.clone().select(0, desc_score_indices.clone());
+        let input = AveragePrecisionInput::new(
+            Tensor::from_data([[0.0, 1.0], [1.0, 0.0], [1.0, 0.0], [0.0, 1.0]], &device),
+            Tensor::from_data([1, 0, 0, 1], &device),
+        );
 
-        let threshold_idxs = Tensor::arange(0..(n_samples as i64), &device).float();
-        let tps = target.clone().cumsum(0).float();
-        let fps = threshold_idxs - tps.clone() + 1;
+        let _entry = metric.update(&input, &MetricMetadata::fake());
+        assert_eq!(metric.value(), 100.0); // Perfect AUC
+    }
 
-        let precision = tps.clone().div(tps.clone() + fps);
-        let positives = target.sum().float();
-        let recall = tps.div(positives);
-        let precision = precision.flip([0]);
-        let recall = recall.flip([0]);
+    #[test]
+    fn test_average_precision_random() {
+        let device = Default::default();
+        let mut metric = AveragePrecisionMetric::<TestBackend>::new();
 
-        let recall_cur = recall.clone().slice([0..n_samples - 1]);
-        let recall_next = recall.slice([1..n_samples]);
-        let precision_cur = precision.slice([0..n_samples - 1]);
-        let average_precision = -((recall_next - recall_cur) * precision_cur)
-            .sum()
-            .into_scalar(); //TODO f32 or f64?
-        dbg!(average_precision);
+        let input = AveragePrecisionInput::new(
+            Tensor::from_data(
+                [
+                    [0.5, 0.5], // Random predictions
+                    [0.5, 0.5],
+                    [0.5, 0.5],
+                    [0.5, 0.5],
+                ],
+                &device,
+            ),
+            Tensor::from_data([1, 0, 0, 1], &device),
+        );
+
+        let _entry = metric.update(&input, &MetricMetadata::fake());
+        assert_eq!(metric.value(), 50.0);
+    }
+
+    #[test]
+    fn test_average_precision_all_one_class() {
+        let device = Default::default();
+        let mut metric = AveragePrecisionMetric::<TestBackend>::new();
+
+        let input = AveragePrecisionInput::new(
+            Tensor::from_data(
+                [
+                    [0.1, 0.9], // All positives predictions
+                    [0.2, 0.8],
+                    [0.3, 0.7],
+                    [0.4, 0.6],
+                ],
+                &device,
+            ),
+            Tensor::from_data([1, 1, 1, 1], &device), // All positive class
+        );
+
+        let _entry = metric.update(&input, &MetricMetadata::fake());
+        assert_eq!(metric.value(), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Currently only binary classification is supported")]
+    fn test_average_precision_multiclass_error() {
+        let device = Default::default();
+        let mut metric = AveragePrecisionMetric::<TestBackend>::new();
+
+        let input = AveragePrecisionInput::new(
+            Tensor::from_data(
+                [
+                    [0.1, 0.2, 0.7], // More than 2 classes not supported
+                    [0.3, 0.5, 0.2],
+                ],
+                &device,
+            ),
+            Tensor::from_data([2, 1], &device),
+        );
+
+        let _entry = metric.update(&input, &MetricMetadata::fake());
     }
 }
