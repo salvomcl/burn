@@ -7,7 +7,10 @@ use crate::metric::{Metric, Numeric};
 use burn_core::tensor::backend::Backend;
 use burn_core::tensor::{ElementConversion, Int, Shape, Tensor};
 
-/// [Average Precision](https://scikit-learn.org/stable/modules/generated/sklearn.metrics.average_precision_score.html) (also referred to as AP) for binary classification.
+/// [Average Precision](https://lightning.ai/docs/torchmetrics/stable/classification/average_precision.html) (also referred to as AP) for binary classification.
+///
+/// This metric calculates the average precision score for binary classification tasks.
+/// It is particularly useful when dealing with imbalanced datasets.
 #[derive(Default)]
 pub struct AveragePrecisionMetric<B: Backend> {
     state: NumericMetricState,
@@ -15,6 +18,8 @@ pub struct AveragePrecisionMetric<B: Backend> {
 }
 
 /// The [Average Precision metric](AveragePrecisionMetric) input type.
+///
+/// This struct holds the model outputs and the true target labels required to compute the average precision.
 #[derive(new)]
 pub struct AveragePrecisionInput<B: Backend> {
     outputs: Tensor<B, 2>,
@@ -22,11 +27,19 @@ pub struct AveragePrecisionInput<B: Backend> {
 }
 
 impl<B: Backend> AveragePrecisionMetric<B> {
-    /// Creates the metric.
+    /// Creates a new instance of the `AveragePrecisionMetric`.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Computes the binary average precision score.
+    ///
+    /// # Arguments
+    /// * `probabilities` - A tensor containing the predicted probabilities for the positive class.
+    /// * `targets` - A tensor containing the true binary labels (0 or 1).
+    ///
+    /// # Returns
+    /// The average precision score as an `f64`.
     fn binary_average_precision(
         &self,
         probabilities: &Tensor<B, 1>,
@@ -116,6 +129,14 @@ impl<B: Backend> Metric for AveragePrecisionMetric<B> {
     const NAME: &'static str = "Average Precision";
     type Input = AveragePrecisionInput<B>;
 
+    /// Updates the metric state with the given input and metadata.
+    ///
+    /// # Arguments
+    /// * `input` - The input containing the model outputs and true labels.
+    /// * `_metadata` - Additional metadata (not used in this implementation).
+    ///
+    /// # Returns
+    /// A `MetricEntry` containing the updated metric value.
     fn update(
         &mut self,
         input: &AveragePrecisionInput<B>,
@@ -145,12 +166,14 @@ impl<B: Backend> Metric for AveragePrecisionMetric<B> {
         )
     }
 
+    /// Resets the metric state.
     fn clear(&mut self) {
         self.state.reset()
     }
 }
 
 impl<B: Backend> Numeric for AveragePrecisionMetric<B> {
+    /// Returns the current value of the metric.
     fn value(&self) -> f64 {
         self.state.value()
     }
