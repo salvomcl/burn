@@ -169,18 +169,24 @@ mod tests {
         let input = AveragePrecisionInput::new(
             Tensor::from_data(
                 [
-                    [0.1, 0.9], // High confidence positive
-                    [0.7, 0.3], // Low confidence negative
-                    [0.6, 0.4], // Low confidence negative
-                    [0.2, 0.8], // High confidence positive
+                    [0.46, 0.54],
+                    [0.31, 0.69],
+                    [0.32, 0.68],
+                    [0.9, 0.1],
+                    [0.84, 0.16],
+                    [0.24, 0.76],
+                    [0.75, 0.25],
+                    [0.21, 0.79],
+                    [0.43, 0.57],
+                    [0.4, 0.6],
                 ],
                 &device,
             ),
-            Tensor::from_data([1, 0, 0, 1], &device), // True labels
+            Tensor::from_data([0, 0, 0, 1, 1, 1, 0, 1, 1, 1], &device), // True labels
         );
 
         let _entry = metric.update(&input, &MetricMetadata::fake());
-        assert_eq!(metric.value(), 100.);
+        assert!((metric.value() - 73.7037).abs() < 1e-5);
     }
 
     #[test]
