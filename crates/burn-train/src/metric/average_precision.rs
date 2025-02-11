@@ -32,27 +32,22 @@ impl<B: Backend> AveragePrecisionMetric<B> {
         Self::default()
     }
 
-    /// Computes the binary average precision score.
+    /// Computes the binary classification curve (true positives and false positives).
     ///
     /// # Arguments
     /// * `probabilities` - A tensor containing the predicted probabilities for the positive class.
     /// * `targets` - A tensor containing the true binary labels (0 or 1).
     ///
     /// # Returns
-    /// The average precision score as an `f64`.
-    fn binary_average_precision(
+    /// A tuple containing two tensors:
+    /// - `tps`: True positives at each threshold.
+    /// - `fps`: False positives at each threshold.
+    fn binary_clf_curve(
         &self,
         probabilities: &Tensor<B, 1>,
         targets: &Tensor<B, 1, Int>,
-    ) -> f64 {
+    ) -> (Tensor<B, 1>, Tensor<B, 1>) {
         let [n_samples] = probabilities.dims();
-        let positives = targets.clone().sum().into_scalar().elem::<u64>() as usize;
-
-        // Early return if we don't have both positive samples
-        if positives == 0 {
-            log::warn!("Metric cannot be computed because all target values are negative.");
-            return 0.0;
-        }
 
         let desc_score_indices = probabilities.clone().argsort_descending(0);
 
@@ -90,6 +85,25 @@ impl<B: Backend> AveragePrecisionMetric<B> {
             .float();
         let threshold_idxs = threshold_idxs.float();
         let fps = threshold_idxs - tps.clone() + 1;
+        (tps, fps)
+    }
+
+    /// Computes the precision-recall curve for binary classification.
+    ///
+    /// # Arguments
+    /// * `probabilities` - A tensor containing the predicted probabilities for the positive class.
+    /// * `targets` - A tensor containing the true binary labels (0 or 1).
+    ///
+    /// # Returns
+    /// A tuple containing two tensors:
+    /// - `precision`: Precision values at each threshold.
+    /// - `recall`: Recall values at each threshold.
+    fn binary_precision_recall_curve_compute(
+        &self,
+        probabilities: &Tensor<B, 1>,
+        targets: &Tensor<B, 1, Int>,
+    ) -> (Tensor<B, 1>, Tensor<B, 1>) {
+        let (tps, fps) = self.binary_clf_curve(&probabilities, &targets);
 
         let precision = tps.clone().div(tps.clone() + fps);
         let positives = targets.clone().sum().float();
@@ -111,6 +125,32 @@ impl<B: Backend> AveragePrecisionMetric<B> {
             ],
             0,
         );
+        (precision, recall)
+    }
+
+    /// Computes the binary average precision score.
+    ///
+    /// # Arguments
+    /// * `probabilities` - A tensor containing the predicted probabilities for the positive class.
+    /// * `targets` - A tensor containing the true binary labels (0 or 1).
+    ///
+    /// # Returns
+    /// The average precision score as an `f64`.
+    fn binary_average_precision(
+        &self,
+        probabilities: &Tensor<B, 1>,
+        targets: &Tensor<B, 1, Int>,
+    ) -> f64 {
+        let positives = targets.clone().sum().into_scalar().elem::<u64>() as usize;
+
+        // Early return if we don't have both positive samples
+        if positives == 0 {
+            log::warn!("Metric cannot be computed because all target values are negative.");
+            return 0.0;
+        }
+
+        let (precision, recall) =
+            self.binary_precision_recall_curve_compute(probabilities, targets);
 
         let n = precision.dims()[0];
         let recall_cur = recall.clone().slice([0..n - 1]);
